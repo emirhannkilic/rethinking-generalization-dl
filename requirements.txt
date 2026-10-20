@@ -1,0 +1,7 @@
+# Platform-independent dependencies only.
+# torch and torchvision are NOT listed: install them from https://pytorch.org
+# using the command for your platform (see README.md).
+numpy
+pandas
+matplotlib
+pytest

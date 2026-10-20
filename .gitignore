@@ -1,0 +1,38 @@
+# Environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Data and checkpoints (large, re-creatable)
+data/
+checkpoints/
+*.pt
+*.pth
+
+# LaTeX build artifacts
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.bbl
+report/*.blg
+report/*.fls
+report/*.fdb_latexmk
+report/*.synctex.gz
+
+# Instructor-provided course material (not ours to republish)
+docs/*.pdf
+
+# Local agent memory (private notes)
+CLAUDE.md
+PROGRESS.md
