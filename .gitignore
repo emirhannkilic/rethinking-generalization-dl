@@ -36,3 +36,16 @@ docs/*.pdf
 # Local agent memory (private notes)
 CLAUDE.md
 PROGRESS.md
+
+# Results checkpoints (large)
+results/*.pt
+results/*.pth
+
+# LaTeX build artifacts (additional patterns)
+*.aux
+*.log
+*.bbl
+*.blg
+*.out
+*.toc
+*.synctex.gz
