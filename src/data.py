@@ -86,14 +86,20 @@ def apply_label_corruption(
             f"corruption_rate must be in [0, 1], got {corruption_rate}"
         )
 
-    original_labels = torch.tensor(dataset.targets, dtype=torch.long)
+    if hasattr(dataset, "targets"):
+        original_labels = torch.tensor(dataset.targets, dtype=torch.long)
+    elif isinstance(dataset, torch.Tensor):
+        original_labels = dataset.clone().long()
+    else:
+        original_labels = torch.tensor(dataset, dtype=torch.long)
+
     corrupted_labels = original_labels.clone()
 
     if corruption_rate == 0.0:
         return corrupted_labels, original_labels
 
     rng = np.random.RandomState(seed)
-    n = len(dataset)
+    n = len(original_labels)
     num_corrupt = int(round(n * corruption_rate))
     corrupt_idx = rng.choice(n, size=num_corrupt, replace=False)
 
@@ -232,10 +238,14 @@ def build_tensors(
     # Subsample for smoke-test runs.
     if smoke_test:
         train_images = train_images[:n_train_smoke]
-        # Temporarily shrink dataset.targets for label corruption.
+        # Temporarily shrink dataset for label corruption.
         train_ds.targets = train_ds.targets[:n_train_smoke]
+        if hasattr(train_ds, "data"):
+            train_ds.data = train_ds.data[:n_train_smoke]
         test_images  = test_images[:n_test_smoke]
         test_ds.targets  = test_ds.targets[:n_test_smoke]
+        if hasattr(test_ds, "data"):
+            test_ds.data = test_ds.data[:n_test_smoke]
 
     # ---- Apply input corruption ------------------------------------------ #
     train_images = apply_input_corruption(train_images, mode=corruption_mode, seed=seed)

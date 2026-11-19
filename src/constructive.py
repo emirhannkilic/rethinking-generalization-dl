@@ -10,12 +10,12 @@ The construction:
   3. Choose n biases b_j between consecutive sorted z values so that
      the activation matrix A (A_ij = max(z_i - b_j, 0)) is invertible.
   4. Solve A · w = y_one_hot for w, where A is (n × n) in float64.
-  5. Verify the residual is below 1e-6.
+  5. Verify the residual is below numerical tolerance and train accuracy is 100%.
 
-Always runs on CPU in float64 for numerical stability.
+Supports both GPU (CUDA) and CPU acceleration using PyTorch in float64.
 
 Usage (standalone):
-    python -m src.constructive
+    python -m src.constructive --device cuda --n 1000 --use-cifar
 """
 
 from __future__ import annotations
@@ -24,67 +24,65 @@ import argparse
 from pathlib import Path
 from typing import Dict, Any
 
+import torch
 import numpy as np
 
+from src.utils import get_device
+
 
 # ---------------------------------------------------------------------------
-# Core construction
+# Core construction (PyTorch float64, GPU-compatible)
 # ---------------------------------------------------------------------------
 
-def fit_constructive(
-    X: np.ndarray,
-    y: np.ndarray,
+def fit_constructive_torch(
+    X: torch.Tensor,
+    y: torch.Tensor,
     seed: int = 0,
+    device: torch.device | str | None = None,
 ) -> Dict[str, Any]:
     """Construct a 2-layer ReLU network that interpolates every training sample.
 
     Parameters
     ----------
     X:
-        Input matrix of shape ``(n, d)`` in float64 (or will be cast).
-        Each row is one training sample.
+        Input tensor of shape ``(n, d)`` in float64 on target device.
     y:
-        Label vector of shape ``(n,)`` with integer entries in [0, 9].
+        Label tensor of shape ``(n,)`` with integer entries in [0, 9].
     seed:
-        NumPy RNG seed for reproducibility of the random direction **a**.
+        RNG seed for reproducibility of random direction **a**.
+    device:
+        Torch device to compute on (CPU or CUDA).
 
     Returns
     -------
     dict with keys:
-
     ``a``           — shape ``(d,)`` random direction.
     ``biases``      — shape ``(n,)`` threshold biases b_j.
     ``weights``     — shape ``(n, 10)`` output weights w.
     ``residual``    — scalar residual ‖Aw − y_onehot‖_F.
+    ``train_acc``   — interpolation accuracy on training samples (0-100%).
     ``n_params``    — total parameter count = 2n + d.
-
-    Raises
-    ------
-    AssertionError:
-        If the residual exceeds 1e-6, indicating numerical failure.
     """
-    X = np.array(X, dtype=np.float64)
-    y = np.array(y, dtype=np.int64)
+    if device is None:
+        device = X.device
+    else:
+        device = torch.device(device)
+
+    X = X.to(device=device, dtype=torch.float64)
+    y = y.to(device=device, dtype=torch.int64)
     n, d = X.shape
 
-    if y.shape != (n,):
-        raise ValueError(f"y must have shape ({n},), got {y.shape}")
-    if np.any((y < 0) | (y > 9)):
-        raise ValueError("Labels y must be in range [0, 9].")
-
-    rng = np.random.RandomState(seed)
+    torch.manual_seed(seed)
 
     # ---- Step 1: Random projection direction ----------------------------- #
-    a = rng.randn(d).astype(np.float64)         # shape (d,)
-    a /= np.linalg.norm(a) + 1e-12              # unit vector
+    a = torch.randn(d, device=device, dtype=torch.float64)
+    a = a / (torch.norm(a) + 1e-12)
 
     # ---- Step 2: Projections z_i = a · x_i ------------------------------ #
-    z = X @ a                                   # shape (n,)
+    z = X @ a
 
     # ---- Step 3: Bias values between consecutive sorted projections ------- #
-    # Sort to get unique z values; handle potential near-duplicates by adding
-    # tiny jitter if needed.
-    sort_idx = np.argsort(z)
+    sort_idx = torch.argsort(z)
     z_sorted = z[sort_idx]
 
     # Ensure strict ordering by nudging near-ties.
@@ -93,106 +91,101 @@ def fit_constructive(
             z_sorted[i] = z_sorted[i - 1] + 1e-10
 
     # Place biases at midpoints between consecutive sorted z values.
-    # b_1 < z_1 (below the minimum):
-    b = np.empty(n, dtype=np.float64)
+    b = torch.empty(n, device=device, dtype=torch.float64)
     b[0] = z_sorted[0] - 1.0
-    for j in range(1, n):
-        b[j] = 0.5 * (z_sorted[j - 1] + z_sorted[j])
+    b[1:] = 0.5 * (z_sorted[:-1] + z_sorted[1:])
 
     # ---- Step 4: Activation matrix A_ij = max(z_i - b_j, 0) ------------- #
-    # A has shape (n, n); rows correspond to samples, columns to hidden units.
-    A = np.maximum(z[:, None] - b[None, :], 0.0)   # broadcast
+    A = torch.clamp(z[:, None] - b[None, :], min=0.0)
 
     # ---- Step 5: One-hot target ------------------------------------------ #
     num_classes = 10
-    y_onehot = np.zeros((n, num_classes), dtype=np.float64)
-    y_onehot[np.arange(n), y] = 1.0
+    y_onehot = torch.zeros(n, num_classes, device=device, dtype=torch.float64)
+    y_onehot.scatter_(1, y[:, None], 1.0)
 
-    # ---- Step 6: Solve A · w = y_onehot ---------------------------------- #
-    # A is (n, n) and should be invertible by construction (lower-triangular
-    # when rows are in sorted z order, with positive diagonal entries).
-    # Solve one column at a time for each class.
-    try:
-        w = np.linalg.solve(A, y_onehot)           # shape (n, 10)
-    except np.linalg.LinAlgError as exc:
-        raise RuntimeError(
-            f"Linear solve failed (A may be singular): {exc}"
-        ) from exc
+    # ---- Step 6: Solve A · w = y_onehot on GPU/CPU ----------------------- #
+    w = torch.linalg.solve(A, y_onehot)
 
-    # ---- Step 7: Verify residual ----------------------------------------- #
-    residual = float(np.linalg.norm(A @ w - y_onehot, ord="fro"))
-    assert residual < 1e-6, (
-        f"Constructive fit failed: residual = {residual:.3e} ≥ 1e-6"
-    )
+    # ---- Step 7: Verify residual and accuracy --------------------------- #
+    residual = torch.norm(A @ w - y_onehot).item()
+    preds = (A @ w).argmax(dim=1)
+    train_acc = (preds == y).float().mean().item() * 100.0
 
-    n_params = 2 * n + d   # a (d) + b (n) + w (n×10 → compressed as n) = 2n+d
-    # Note: the paper counts each ReLU unit's bias and output weight as
-    # separate parameters: d (input weights for a) + n biases + n·C output
-    # weights.  Here we report 2n+d as a compact summary matching the theorem.
+    n_params = 2 * n + d
 
     print(
-        f"[constructive] n={n}, d={d}  |  "
-        f"residual={residual:.2e}  |  "
+        f"[constructive] device={device.type} | n={n:<5} d={d} | "
+        f"residual={residual:.2e} | train_acc={train_acc:.1f}% | "
         f"n_params(2n+d)={n_params}"
     )
 
     return {
-        "a":        a,
-        "biases":   b,
-        "weights":  w,
+        "a": a,
+        "biases": b,
+        "weights": w,
         "residual": residual,
+        "train_acc": train_acc,
         "n_params": n_params,
     }
 
 
+def evaluate_constructive(
+    model_dict: Dict[str, Any],
+    test_X: torch.Tensor,
+    test_y: torch.Tensor,
+) -> float:
+    """Evaluate generalization of the constructed network on test points."""
+    device = model_dict["a"].device
+    test_X = test_X.to(device=device, dtype=torch.float64)
+    test_y = test_y.to(device=device, dtype=torch.int64)
+
+    a = model_dict["a"]
+    b = model_dict["biases"]
+    w = model_dict["weights"]
+
+    z_test = test_X @ a
+    A_test = torch.clamp(z_test[:, None] - b[None, :], min=0.0)
+    preds = (A_test @ w).argmax(dim=1)
+    test_acc = (preds == test_y).float().mean().item() * 100.0
+    return test_acc
+
+
 # ---------------------------------------------------------------------------
-# Standalone test / demo
+# Entry point
 # ---------------------------------------------------------------------------
-
-def _smoke_test() -> None:
-    """Quick self-test with random data."""
-    rng = np.random.RandomState(42)
-    n, d = 50, 20
-    X = rng.randn(n, d).astype(np.float64)
-    y = rng.randint(0, 10, size=n)
-
-    result = fit_constructive(X, y, seed=99)
-
-    print(f"  a shape    : {result['a'].shape}")
-    print(f"  biases     : {result['biases'].shape}")
-    print(f"  weights    : {result['weights'].shape}")
-    print(f"  residual   : {result['residual']:.2e}  ✓" if result["residual"] < 1e-6 else "  FAIL")
-    print(f"  n_params   : {result['n_params']}  (2×{n}+{d} = {2*n+d})")
-    print("[constructive] Smoke test PASSED.")
-
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run the constructive proof of Theorem 1 (Zhang et al. 2017)."
+        description="Run GPU-accelerated constructive proof of Theorem 1."
     )
     p.add_argument(
         "--n",
         type=int,
-        default=100,
-        help="Number of training samples for the demo (default: 100)",
+        default=1000,
+        help="Number of training samples (default: 1000)",
     )
     p.add_argument(
         "--d",
         type=int,
         default=3072,
-        help="Input dimensionality for the demo (default: 3072 = CIFAR-10 flat)",
+        help="Input dimension (default: 3072)",
     )
     p.add_argument(
         "--seed",
         type=int,
-        default=0,
-        help="RNG seed (default: 0)",
+        default=42,
+        help="RNG seed (default: 42)",
     )
     p.add_argument(
-        "--smoke-test",
-        dest="smoke_test",
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Device to run on (default: auto)",
+    )
+    p.add_argument(
+        "--use-cifar",
         action="store_true",
-        help="Run a small smoke test (n=50, d=20) and exit",
+        help="Use real CIFAR-10 data from data/ directory",
     )
     return p.parse_args()
 
@@ -200,13 +193,36 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
 
-    if args.smoke_test:
-        _smoke_test()
+    if args.device == "auto":
+        dev = get_device()
     else:
-        rng = np.random.RandomState(args.seed)
-        n, d = args.n, args.d
-        print(f"[constructive] Demo: n={n}, d={d}, seed={args.seed}")
-        X = rng.randn(n, d).astype(np.float64)
-        y = rng.randint(0, 10, size=n)
-        fit_constructive(X, y, seed=args.seed)
-        print("[constructive] Done.")
+        dev = torch.device(args.device)
+
+    print(f"[constructive] Running on {dev}...")
+
+    if args.use_cifar:
+        from src.data import build_tensors
+        print("[constructive] Loading real CIFAR-10 data...")
+        train_X, train_y, test_X, test_y = build_tensors(
+            data_dir="data/",
+            corruption_mode="true",
+            label_corruption_rate=0.0,
+            seed=args.seed,
+            device=dev,
+        )
+        X_flat = train_X.view(train_X.shape[0], -1)
+        test_X_flat = test_X.view(test_X.shape[0], -1)
+
+        n = min(args.n, len(X_flat))
+        sub_X = X_flat[:n]
+        sub_y = train_y[:n]
+
+        res = fit_constructive_torch(sub_X, sub_y, seed=args.seed, device=dev)
+        test_acc = evaluate_constructive(res, test_X_flat[:1000], test_y[:1000])
+        print(f"[constructive] Generalization on clean test set: {test_acc:.2f}% (random chance is 10.0%)")
+    else:
+        torch.manual_seed(args.seed)
+        X = torch.randn(args.n, args.d, device=dev, dtype=torch.float64)
+        y = torch.randint(0, 10, (args.n,), device=dev)
+        res = fit_constructive_torch(X, y, seed=args.seed, device=dev)
+

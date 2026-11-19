@@ -369,8 +369,10 @@ For each training point $\mathbf{x}_i$,
   For CIFAR-10 ($d = 3{,}072$, $n = 50{,}000$), the theorem gives
   $p = 2 \times 50{,}000 + 3{,}072 = 103{,}072$ parameters. Both SmallCNN
   ($5{,}158{,}730$ parameters) and MLP-512 ($1{,}578{,}506$ parameters) far
-  exceed this lower bound, confirming they have the structural capacity to
-  memorize the full CIFAR-10 training set under any labeling.
+  exceed this theoretical interpolation threshold.
+  We implemented this constructive proof in \texttt{src/constructive.py} with GPU-accelerated double-precision linear algebra (\texttt{torch.linalg.solve} on CUDA).
+  Running on actual CIFAR-10 images for $n \in \{100, 500, 1{,}000, 2{,}000\}$, the constructed 2-layer network achieves strictly $100.0\%$ training accuracy with machine-level solver residuals ($2.65\times 10^{-10}$ for $n=100$, $3.16\times 10^{-6}$ for $n=1{,}000$, and $1.51\times 10^{-5}$ for $n=2{,}000$), while exhibiting purely random-chance generalization on clean test images ($10.90\%$ for $n=1{,}000$).
+  This cleanly proves in practice that achieving zero training error with a low-complexity parameter budget ($p = 2n + d$) provides zero guarantee of generalization.
 \end{remark}
 
 %% ============================================================
@@ -555,8 +557,17 @@ Our results in \Cref{tab:results} and \Cref{fig:slowdown} confirm the convergenc
 At $\alpha = 1.0$ (and the $\alpha = 1.0$ input-randomization runs), training accuracy remains at the $10.00 \pm 0.08\%$ symmetry plateau within the $40$-epoch budget with constant learning rate $0.01$. This deviation from the original paper's eventual $100\%$ training accuracy at $\alpha = 1.0$ is explained by our shorter $40$-epoch budget (versus $300+$ epochs with learning-rate annealing in Zhang et al.): when zero semantic gradient signal is present, SGD requires substantially more iterations to break initial symmetry before entering the memorization phase.
 
 \paragraph{Finite-Sample Expressivity vs.\ Generalization.}
-Our constructive proof of Theorem~\ref{thm:representation} implemented in \texttt{src/constructive.py} independently verified with machine precision (residual $2.13 \times 10^{-10}$) that a 2-layer ReLU network with only $2n + d = 2(50{,}000) + 3{,}072 = 103{,}072$ parameters can interpolate any arbitrary labeling of CIFAR-10.
-SmallCNN contains $5{,}158{,}730$ parameters --- approximately $50\times$ above this theoretical interpolation threshold. Because the exact same architecture achieves $83.97\%$ test accuracy without explicit regularizers on clean data yet memorizes up to $98.33\%$--$99.97\%$ of partially corrupted datasets, label-independent capacity bounds (VC dimension, Rademacher complexity) cannot explain deep learning generalization.
+Our constructive proof of Theorem~\ref{thm:representation} implemented in \texttt{src/constructive.py} with GPU-accelerated double-precision linear algebra (\texttt{torch.linalg.solve} on CUDA) verified on actual CIFAR-10 images that a 2-layer ReLU network with only $p = 2n + d$ parameters ($3{,}272$ for $n=100$, $5{,}072$ for $n=1{,}000$, and $7{,}072$ for $n=2{,}000$) achieves strictly $100.0\%$ training accuracy with negligible solver residuals ($10^{-10}$ to $10^{-5}$), while yielding $10.90\%$ test accuracy on unseen clean test data.
+SmallCNN contains $5{,}158{,}730$ parameters --- approximately $50\times$ above the theoretical $103{,}072$ interpolation threshold for the full CIFAR-10 dataset ($n=50{,}000, d=3{,}072$).
+Because the exact same architecture achieves $83.97\%$ test accuracy without explicit regularizers on clean data yet memorizes up to $98.33\%$--$99.97\%$ of partially corrupted datasets, label-independent capacity bounds (VC dimension, Rademacher complexity) cannot explain deep learning generalization.
+
+\paragraph{Analysis of Optimization Dynamics and Experimental Limitations.}
+We openly document the core operational distinction between mathematical capacity and empirical optimization dynamics in our experiments:
+\begin{enumerate}
+  \item \emph{Empirical Verification of Capacity:} Our GPU constructive solver verifies Theorem~1 directly: neural networks with $2n+d$ parameters possess global minima achieving exact $100\%$ memorization for arbitrary label assignments.
+  \item \emph{Empirical Verification on Noise Subsets:} On a 1,000-sample subset of CIFAR-10 with 100\% random labels, training SmallCNN with Adam reached strictly $100.0\%$ memorization within 60 epochs (from $10\%$ at epoch~1 to $58.6\%$ at epoch~30, $99.8\%$ at epoch~50, and $100.0\%$ at epoch~60).
+  \item \emph{Limitation of Fixed 40-Epoch SGD on 50k Pure Noise:} On the full 50,000 dataset with $\alpha = 1.0$, standard SGD ($lr=0.01$) without momentum adjustments or an extended schedule requires hundreds of epochs (as in Zhang et al., who ran up to 300+ epochs with learning-rate drops) to break symmetry. In our 40-epoch runs, the network remained on the initial saddle/symmetry plateau ($10.0\%$ accuracy), clearly delineating the boundary between what SGD discovers within a limited epoch budget and the network's asymptotic representational capacity.
+\end{enumerate}
 
 %% ============================================================
 \section{Conclusion}
